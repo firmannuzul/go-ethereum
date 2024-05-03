@@ -1,16 +1,20 @@
 package metrics
 
 import (
-	"sync"
+	"math"
+	"sync/atomic"
 )
+
+type CounterFloat64Snapshot interface {
+	Count() float64
+}
 
 // CounterFloat64 holds a float64 value that can be incremented and decremented.
 type CounterFloat64 interface {
 	Clear()
-	Count() float64
 	Dec(float64)
 	Inc(float64)
-	Snapshot() CounterFloat64
+	Snapshot() CounterFloat64Snapshot
 }
 
 // GetOrRegisterCounterFloat64 returns an existing CounterFloat64 or constructs and registers
@@ -38,13 +42,13 @@ func NewCounterFloat64() CounterFloat64 {
 	if !Enabled {
 		return NilCounterFloat64{}
 	}
-	return &StandardCounterFloat64{count: 0.0}
+	return &StandardCounterFloat64{}
 }
 
 // NewCounterFloat64Forced constructs a new StandardCounterFloat64 and returns it no matter if
 // the global switch is enabled or not.
 func NewCounterFloat64Forced() CounterFloat64 {
-	return &StandardCounterFloat64{count: 0.0}
+	return &StandardCounterFloat64{}
 }
 
 // NewRegisteredCounterFloat64 constructs and registers a new StandardCounterFloat64.
@@ -70,84 +74,53 @@ func NewRegisteredCounterFloat64Forced(name string, r Registry) CounterFloat64 {
 	return c
 }
 
-// CounterFloat64Snapshot is a read-only copy of another CounterFloat64.
-type CounterFloat64Snapshot float64
-
-// Clear panics.
-func (CounterFloat64Snapshot) Clear() {
-	panic("Clear called on a CounterFloat64Snapshot")
-}
+// counterFloat64Snapshot is a read-only copy of another CounterFloat64.
+type counterFloat64Snapshot float64
 
 // Count returns the value at the time the snapshot was taken.
-func (c CounterFloat64Snapshot) Count() float64 { return float64(c) }
+func (c counterFloat64Snapshot) Count() float64 { return float64(c) }
 
-// Dec panics.
-func (CounterFloat64Snapshot) Dec(float64) {
-	panic("Dec called on a CounterFloat64Snapshot")
-}
-
-// Inc panics.
-func (CounterFloat64Snapshot) Inc(float64) {
-	panic("Inc called on a CounterFloat64Snapshot")
-}
-
-// Snapshot returns the snapshot.
-func (c CounterFloat64Snapshot) Snapshot() CounterFloat64 { return c }
-
-// NilCounterFloat64 is a no-op CounterFloat64.
 type NilCounterFloat64 struct{}
 
-// Clear is a no-op.
-func (NilCounterFloat64) Clear() {}
-
-// Count is a no-op.
-func (NilCounterFloat64) Count() float64 { return 0.0 }
-
-// Dec is a no-op.
-func (NilCounterFloat64) Dec(i float64) {}
-
-// Inc is a no-op.
-func (NilCounterFloat64) Inc(i float64) {}
-
-// Snapshot is a no-op.
-func (NilCounterFloat64) Snapshot() CounterFloat64 { return NilCounterFloat64{} }
+func (NilCounterFloat64) Clear()                           {}
+func (NilCounterFloat64) Count() float64                   { return 0.0 }
+func (NilCounterFloat64) Dec(i float64)                    {}
+func (NilCounterFloat64) Inc(i float64)                    {}
+func (NilCounterFloat64) Snapshot() CounterFloat64Snapshot { return NilCounterFloat64{} }
 
 // StandardCounterFloat64 is the standard implementation of a CounterFloat64 and uses the
-// sync.Mutex package to manage a single float64 value.
+// atomic to manage a single float64 value.
 type StandardCounterFloat64 struct {
-	mutex sync.Mutex
-	count float64
+	floatBits atomic.Uint64
 }
 
 // Clear sets the counter to zero.
 func (c *StandardCounterFloat64) Clear() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.count = 0.0
-}
-
-// Count returns the current value.
-func (c *StandardCounterFloat64) Count() float64 {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	return c.count
+	c.floatBits.Store(0)
 }
 
 // Dec decrements the counter by the given amount.
 func (c *StandardCounterFloat64) Dec(v float64) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.count -= v
+	atomicAddFloat(&c.floatBits, -v)
 }
 
 // Inc increments the counter by the given amount.
 func (c *StandardCounterFloat64) Inc(v float64) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.count += v
+	atomicAddFloat(&c.floatBits, v)
 }
 
 // Snapshot returns a read-only copy of the counter.
-func (c *StandardCounterFloat64) Snapshot() CounterFloat64 {
-	return CounterFloat64Snapshot(c.Count())
+func (c *StandardCounterFloat64) Snapshot() CounterFloat64Snapshot {
+	v := math.Float64frombits(c.floatBits.Load())
+	return counterFloat64Snapshot(v)
+}
+
+func atomicAddFloat(fbits *atomic.Uint64, v float64) {
+	for {
+		loadedBits := fbits.Load()
+		newBits := math.Float64bits(math.Float64frombits(loadedBits) + v)
+		if fbits.CompareAndSwap(loadedBits, newBits) {
+			break
+		}
+	}
 }
